@@ -1,0 +1,11 @@
+name: C Build and Smoke Tests
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run smoke tests
+        run: sh tests/run_tests.sh
