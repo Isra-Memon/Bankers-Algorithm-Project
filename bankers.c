@@ -1,247 +1,231 @@
-/* ============================================================
- * bankers.c — Banker's Algorithm (Deadlock Avoidance)
- * Operating Systems Lab — CSC-251L
- *
- * Compile:  gcc -Wall -Wextra -o bankers bankers.c
- * Run:      ./bankers
- * ============================================================ */
-
+/* Banker's Algorithm Deadlock Avoidance Simulator
+ * Build: gcc -std=c11 -Wall -Wextra -pedantic bankers.c -o bankers
+ */
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+#include <limits.h>
 
 #define MAX_PROC 10
-#define MAX_RES  10
+#define MAX_RES 10
+#define LINE 256
 
-int n;                          /* number of processes */
-int m;                          /* number of resource types */
+typedef struct {
+    int n, m;
+    int available[MAX_RES];
+    int allocation[MAX_PROC][MAX_RES];
+    int maximum[MAX_PROC][MAX_RES];
+    int need[MAX_PROC][MAX_RES];
+    bool loaded;
+} System;
 
-int Available[MAX_RES];
-int Max[MAX_PROC][MAX_RES];
-int Allocation[MAX_PROC][MAX_RES];
-int Need[MAX_PROC][MAX_RES];
-
-/* ------------------------------------------------------------
- * Need[i][j] = Max[i][j] - Allocation[i][j]
- * ------------------------------------------------------------ */
-void calculateNeed(void) {
-    for (int i = 0; i < n; i++)
-        for (int j = 0; j < m; j++)
-            Need[i][j] = Max[i][j] - Allocation[i][j];
-}
-
-/* ------------------------------------------------------------
- * Print the current state as a table
- * ------------------------------------------------------------ */
-void printState(void) {
-    printf("\n%-8s %-18s %-18s %-18s\n",
-           "Proc", "Allocation", "Max", "Need");
-    for (int i = 0; i < n; i++) {
-        printf("P%-7d ", i);
-        for (int j = 0; j < m; j++) printf("%d ", Allocation[i][j]);
-        printf("      ");
-        for (int j = 0; j < m; j++) printf("%d ", Max[i][j]);
-        printf("      ");
-        for (int j = 0; j < m; j++) printf("%d ", Need[i][j]);
-        printf("\n");
+static bool read_int(const char *prompt, int min, int max, int *out) {
+    char line[LINE], extra;
+    long value;
+    for (;;) {
+        printf("%s", prompt);
+        if (!fgets(line, sizeof line, stdin)) return false;
+        if (!strchr(line, '\n') && !feof(stdin)) {
+            int c;
+            while ((c = getchar()) != '\n' && c != EOF) {}
+            puts("Input too long. Try again.");
+            continue;
+        }
+        if (sscanf(line, " %ld %c", &value, &extra) == 1 &&
+            value >= min && value <= max) {
+            *out = (int)value;
+            return true;
+        }
+        printf("Enter an integer from %d to %d.\n", min, max);
     }
-    printf("\nAvailable: ");
-    for (int j = 0; j < m; j++) printf("%d ", Available[j]);
-    printf("\n");
 }
 
-/* ------------------------------------------------------------
- * Safety Algorithm
- * Returns true if system is in a SAFE state.
- * Fills safeSeq[] with the safe sequence (length n).
- * ------------------------------------------------------------ */
-bool isSafe(int safeSeq[]) {
-    int Work[MAX_RES];
-    bool Finish[MAX_PROC] = {false};
+static void calculate_need(System *s) {
+    for (int i = 0; i < s->n; ++i)
+        for (int j = 0; j < s->m; ++j)
+            s->need[i][j] = s->maximum[i][j] - s->allocation[i][j];
+}
+
+static bool safe(const System *s, int sequence[MAX_PROC], bool verbose) {
+    int work[MAX_RES];
+    bool finished[MAX_PROC] = {false};
     int count = 0;
-
-    /* Step 1: Work = Available */
-    for (int j = 0; j < m; j++)
-        Work[j] = Available[j];
-
-    /* Step 2: Find processes that can finish */
-    while (count < n) {
-        bool found = false;
-
-        for (int i = 0; i < n; i++) {
-            if (Finish[i]) continue;
-
-            /* Check Need[i] <= Work for every resource */
-            bool canRun = true;
-            for (int j = 0; j < m; j++) {
-                if (Need[i][j] > Work[j]) { canRun = false; break; }
+    for (int j = 0; j < s->m; ++j) work[j] = s->available[j];
+    while (count < s->n) {
+        bool progress = false;
+        for (int i = 0; i < s->n; ++i) {
+            if (finished[i]) continue;
+            bool possible = true;
+            for (int j = 0; j < s->m; ++j)
+                if (s->need[i][j] > work[j]) possible = false;
+            if (!possible) continue;
+            if (verbose) {
+                printf("P%d completes; work before:", i);
+                for (int j = 0; j < s->m; ++j) printf(" %d", work[j]);
             }
-
-            if (canRun) {
-                /* Process i can finish: release its resources */
-                for (int j = 0; j < m; j++)
-                    Work[j] += Allocation[i][j];
-
-                safeSeq[count++] = i;
-                Finish[i] = true;
-                found = true;
+            for (int j = 0; j < s->m; ++j)
+                work[j] += s->allocation[i][j];
+            if (verbose) {
+                printf("; work after:");
+                for (int j = 0; j < s->m; ++j) printf(" %d", work[j]);
+                putchar('\n');
             }
+            sequence[count++] = i;
+            finished[i] = true;
+            progress = true;
         }
-
-        if (!found) break;  /* no process could proceed → unsafe */
+        if (!progress) break;
     }
-
-    return (count == n);
+    return count == s->n;
 }
 
-/* ------------------------------------------------------------
- * Resource Request Algorithm
- * pid       — process index (0-based)
- * Request[] — requested resources
- * Returns true if granted, false if denied/wait
- * ------------------------------------------------------------ */
-bool requestResources(int pid, int Request[]) {
+static void show_sequence(const System *s, const int seq[MAX_PROC]) {
+    printf("Safe sequence: ");
+    for (int i = 0; i < s->n; ++i)
+        printf("%sP%d", i ? " -> " : "", seq[i]);
+    putchar('\n');
+}
 
-    /* Step 1: Request must not exceed declared Need */
-    for (int j = 0; j < m; j++) {
-        if (Request[j] > Need[pid][j]) {
-            printf("\nERROR: P%d requested more than its Max claim.\n", pid);
-            return false;
-        }
+static void display(const System *s) {
+    puts("\nProcess | Allocation | Maximum | Need");
+    for (int i = 0; i < s->n; ++i) {
+        printf("P%-7d| ", i);
+        for (int j = 0; j < s->m; ++j) printf("%d ", s->allocation[i][j]);
+        printf("| ");
+        for (int j = 0; j < s->m; ++j) printf("%d ", s->maximum[i][j]);
+        printf("| ");
+        for (int j = 0; j < s->m; ++j) printf("%d ", s->need[i][j]);
+        putchar('\n');
     }
+    printf("Available: ");
+    for (int j = 0; j < s->m; ++j) printf("%d ", s->available[j]);
+    putchar('\n');
+}
 
-    /* Step 2: Request must not exceed Available */
-    for (int j = 0; j < m; j++) {
-        if (Request[j] > Available[j]) {
-            printf("\nP%d must WAIT — resources not currently available.\n", pid);
-            return false;
-        }
-    }
-
-    /* Step 3: Pretend to allocate */
-    for (int j = 0; j < m; j++) {
-        Available[j]        -= Request[j];
-        Allocation[pid][j]  += Request[j];
-        Need[pid][j]        -= Request[j];
-    }
-
-    /* Step 4: Check safety after pretend allocation */
-    int seq[MAX_PROC];
-    if (isSafe(seq)) {
-        printf("\nRequest GRANTED to P%d.\nSafe sequence: ", pid);
-        for (int i = 0; i < n; i++) printf("P%d ", seq[i]);
-        printf("\n");
-        return true;
-    } else {
-        /* ROLLBACK */
-        for (int j = 0; j < m; j++) {
-            Available[j]        += Request[j];
-            Allocation[pid][j]  -= Request[j];
-            Need[pid][j]        += Request[j];
-        }
-        printf("\nRequest DENIED — system would become UNSAFE.\n");
-        printf("P%d must wait. State has been rolled back.\n", pid);
+static bool input_data(System *s) {
+    System tmp = {0};
+    int x;
+    if (!read_int("Processes (1-10): ", 1, MAX_PROC, &tmp.n) ||
+        !read_int("Resource types (1-10): ", 1, MAX_RES, &tmp.m))
         return false;
+    for (int j = 0; j < tmp.m; ++j) {
+        char prompt[80];
+        snprintf(prompt, sizeof prompt, "Available R%d: ", j);
+        if (!read_int(prompt, 0, 1000000, &tmp.available[j])) return false;
     }
+    for (int i = 0; i < tmp.n; ++i)
+        for (int j = 0; j < tmp.m; ++j) {
+            char prompt[80];
+            snprintf(prompt, sizeof prompt, "Allocation P%d R%d: ", i, j);
+            if (!read_int(prompt, 0, 1000000, &x)) return false;
+            tmp.allocation[i][j] = x;
+        }
+    for (int i = 0; i < tmp.n; ++i)
+        for (int j = 0; j < tmp.m; ++j) {
+            char prompt[80];
+            snprintf(prompt, sizeof prompt, "Maximum P%d R%d (min %d): ",
+                     i, j, tmp.allocation[i][j]);
+            if (!read_int(prompt, tmp.allocation[i][j], 1000000, &x)) return false;
+            tmp.maximum[i][j] = x;
+        }
+    calculate_need(&tmp);
+    tmp.loaded = true;
+    *s = tmp;
+    puts("Data saved successfully.");
+    return true;
 }
 
-/* ------------------------------------------------------------
- * Input helper
- * ------------------------------------------------------------ */
-void inputData(void) {
-    printf("Enter number of processes (max %d): ", MAX_PROC);
-    scanf("%d", &n);
-    printf("Enter number of resource types (max %d): ", MAX_RES);
-    scanf("%d", &m);
-
-    printf("\nEnter Available resources (%d values):\n", m);
-    for (int j = 0; j < m; j++) {
-        printf("  Available[%d]: ", j);
-        scanf("%d", &Available[j]);
-    }
-
-    printf("\nEnter Allocation matrix (%d x %d):\n", n, m);
-    for (int i = 0; i < n; i++)
-        for (int j = 0; j < m; j++) {
-            printf("  Allocation[P%d][%d]: ", i, j);
-            scanf("%d", &Allocation[i][j]);
+static void sample(System *s) {
+    static const int a[5][3] = {
+        {0,1,0}, {2,0,0}, {3,0,2}, {2,1,1}, {0,0,2}
+    };
+    static const int max[5][3] = {
+        {7,5,3}, {3,2,2}, {9,0,2}, {2,2,2}, {4,3,3}
+    };
+    memset(s, 0, sizeof *s);
+    s->n = 5; s->m = 3;
+    s->available[0] = 3; s->available[1] = 3; s->available[2] = 2;
+    for (int i = 0; i < 5; ++i)
+        for (int j = 0; j < 3; ++j) {
+            s->allocation[i][j] = a[i][j];
+            s->maximum[i][j] = max[i][j];
         }
-
-    printf("\nEnter Max matrix (%d x %d):\n", n, m);
-    for (int i = 0; i < n; i++)
-        for (int j = 0; j < m; j++) {
-            printf("  Max[P%d][%d]: ", i, j);
-            scanf("%d", &Max[i][j]);
-        }
-
-    calculateNeed();
+    calculate_need(s);
+    s->loaded = true;
+    puts("Standard sample loaded.");
 }
 
-/* ------------------------------------------------------------
- * Main — menu loop
- * ------------------------------------------------------------ */
+static bool request(System *s) {
+    int pid, req[MAX_RES], seq[MAX_PROC];
+    if (!read_int("Process ID: ", 0, s->n - 1, &pid)) return false;
+    for (int j = 0; j < s->m; ++j) {
+        char prompt[80];
+        snprintf(prompt, sizeof prompt, "Request R%d: ", j);
+        if (!read_int(prompt, 0, 1000000, &req[j])) return false;
+    }
+    for (int j = 0; j < s->m; ++j)
+        if (req[j] > s->need[pid][j]) {
+            puts("DENIED: Request exceeds remaining need.");
+            return true;
+        }
+    for (int j = 0; j < s->m; ++j)
+        if (req[j] > s->available[j]) {
+            puts("WAIT: Insufficient available resources.");
+            return true;
+        }
+    for (int j = 0; j < s->m; ++j) {
+        s->available[j] -= req[j];
+        s->allocation[pid][j] += req[j];
+        s->need[pid][j] -= req[j];
+    }
+    if (safe(s, seq, false)) {
+        puts("GRANTED: System remains safe.");
+        show_sequence(s, seq);
+    } else {
+        for (int j = 0; j < s->m; ++j) {
+            s->available[j] += req[j];
+            s->allocation[pid][j] -= req[j];
+            s->need[pid][j] += req[j];
+        }
+        puts("DENIED: Unsafe state; allocation rolled back.");
+    }
+    return true;
+}
+
 int main(void) {
-    int choice;
-
-    printf("========== BANKER'S ALGORITHM ==========\n");
-    inputData();
-
-    while (1) {
-        printf("\n========== MENU ==========\n");
-        printf("1. Print current state\n");
-        printf("2. Check if system is SAFE\n");
-        printf("3. Request resources for a process\n");
-        printf("4. Exit\n");
-        printf("Choice: ");
-        scanf("%d", &choice);
-
+    System s = {0};
+    int choice, seq[MAX_PROC];
+    puts("=== BANKER'S ALGORITHM SIMULATOR ===");
+    for (;;) {
+        puts("\n1. Enter data\n2. Display matrices\n3. Calculate Need matrix\n"
+             "4. Check safety (step-by-step)\n5. Request resources\n"
+             "6. Load sample data\n7. Exit");
+        if (!read_int("Choice: ", 1, 7, &choice)) break;
+        if (choice == 7) break;
+        if (choice == 1) {
+            if (!input_data(&s)) break;
+            continue;
+        }
+        if (choice == 6) { sample(&s); continue; }
+        if (!s.loaded) { puts("Enter or load data first."); continue; }
         switch (choice) {
-
-        case 1:
-            printState();
-            break;
-
-        case 2: {
-            int seq[MAX_PROC];
-            if (isSafe(seq)) {
-                printf("\nSystem is in a SAFE state.\nSafe sequence: ");
-                for (int i = 0; i < n; i++) printf("P%d ", seq[i]);
-                printf("\n");
-            } else {
-                printf("\nSystem is in an UNSAFE state — deadlock possible.\n");
-            }
-            break;
-        }
-
-        case 3: {
-            int pid;
-            int Request[MAX_RES];
-
-            printf("Enter process number (0 to %d): ", n - 1);
-            scanf("%d", &pid);
-
-            if (pid < 0 || pid >= n) {
-                printf("Invalid process number.\n");
+            case 2: display(&s); break;
+            case 3: calculate_need(&s); display(&s); break;
+            case 4:
+                if (safe(&s, seq, true)) {
+                    puts("SAFE STATE");
+                    show_sequence(&s, seq);
+                } else {
+                    puts("UNSAFE STATE (not necessarily deadlocked).");
+                }
                 break;
-            }
-
-            printf("Enter request for P%d (%d values):\n", pid, m);
-            for (int j = 0; j < m; j++) {
-                printf("  Request[%d]: ", j);
-                scanf("%d", &Request[j]);
-            }
-
-            requestResources(pid, Request);
-            break;
-        }
-
-        case 4:
-            printf("Exiting.\n");
-            return 0;
-
-        default:
-            printf("Invalid choice.\n");
+            case 5:
+                if (!request(&s)) return 0;
+                break;
+            default: break;
         }
     }
-
+    puts("Goodbye.");
     return 0;
 }
